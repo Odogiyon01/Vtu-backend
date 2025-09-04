@@ -1,0 +1,5 @@
+PORT=5000
+FIREBASE_KEY={"type":"service_account","project_id":"..."}   # copy full JSON key from Firebase
+SMEPLUG_API_KEY=your_smeplug_api_key
+OPAY_SECRET_KEY=your_opay_secret
+OPAY_CALLBACK=https://your-backend.onrender.com/api/payments/opay/webhook
