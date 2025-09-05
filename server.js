@@ -7,13 +7,18 @@ import fetch from "node-fetch";
 // ---------------- FIREBASE SETUP ---------------- //
 let serviceAccount;
 if (process.env.FIREBASE_KEY) {
-  serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
-}
+  try {
+    serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+      });
+      console.log("✅ Firebase initialized successfully!");
+    }
+  } catch (err) {
+    console.error("❌ Failed to parse FIREBASE_KEY:", err.message);
+  }
 }
 
 const db = admin.firestore();
@@ -24,11 +29,13 @@ app.use(cors());
 app.use(bodyParser.json());
 
 // ---------------- ROUTES ---------------- //
+
+// Root test
 app.get("/", (req, res) => {
-  res.send("✅ Airtime/Data Backend is running on Node.js v24!");
+  res.send("✅ Airtime/Data Backend is running with Firebase on Render!");
 });
 
-// ✅ Example: fetch SMEPlug balance
+// Example: fetch SMEPlug balance
 app.get("/api/smeplug/balance", async (req, res) => {
   try {
     const response = await fetch("https://smeplug.ng/api/v1/balance", {
@@ -43,58 +50,54 @@ app.get("/api/smeplug/balance", async (req, res) => {
   }
 });
 
-// ✅ OPay payment initialization (fund wallet)
-app.post("/api/payments/opay/initiate", async (req, res) => {
-  try {
-    const { amount, userId } = req.body;
-
-    const response = await fetch("https://api.opaycheckout.com/api/v1/international/cashier/create", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPAY_SECRET_KEY}`,
-      },
-      body: JSON.stringify({
-        amount: amount,
-        currency: "NGN",
-        reference: `TXN-${Date.now()}`,
-        callbackUrl: `${process.env.OPAY_CALLBACK}`,
-        userId: userId,
-      }),
-    });
-
-    const data = await response.json();
-    res.json(data);
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ✅ OPay webhook (called after payment)
+// ---------------- OPAY WEBHOOK ---------------- //
 app.post("/api/payments/opay/webhook", async (req, res) => {
   try {
-    console.log("🔔 OPay Webhook received:", req.body);
+    const event = req.body;
+    console.log("📩 Opay Webhook Received:", event);
 
-    const { reference, status, userId, amount } = req.body;
+    // 1. Save webhook event for debugging/history
+    await db.collection("opay_webhooks").add({
+      ...event,
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
 
-    if (status === "SUCCESS") {
-      // Increase user wallet balance in Firestore
-      const userRef = db.collection("users").doc(userId);
-      await db.runTransaction(async (t) => {
-        const doc = await t.get(userRef);
-        if (!doc.exists) throw new Error("User not found");
+    // 2. Process successful payments
+    if (event.status && event.status.toLowerCase() === "success") {
+      const userId = event.userId; // ensure you send userId when creating payment
+      const amount = parseFloat(event.amount) || 0;
 
-        const newBalance = (doc.data().balance || 0) + Number(amount);
-        t.update(userRef, { balance: newBalance });
-      });
-      console.log(`✅ Wallet funded for user: ${userId}, +₦${amount}`);
+      if (userId && amount > 0) {
+        const userRef = db.collection("users").doc(userId);
+
+        await db.runTransaction(async (t) => {
+          const doc = await t.get(userRef);
+          if (!doc.exists) throw new Error("User not found");
+
+          const oldBalance = doc.data().balance || 0;
+          const newBalance = oldBalance + amount;
+
+          t.update(userRef, { balance: newBalance });
+
+          // Save transaction history
+          db.collection("transactions").add({
+            userId,
+            type: "deposit",
+            amount,
+            status: "success",
+            provider: "Opay",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+
+        console.log(`✅ User ${userId} credited with ₦${amount}`);
+      }
     }
 
-    res.sendStatus(200);
-  } catch (error) {
-    console.error("Webhook Error:", error);
-    res.sendStatus(500);
+    res.status(200).json({ success: true, message: "Webhook processed" });
+  } catch (err) {
+    console.error("❌ Webhook Error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
